@@ -1,0 +1,830 @@
+#!/bin/bash
+
+# DocHat QEMU Script
+# written by george@shearer.tech
+
+# designed on ArchLinux but should work on most modern distros
+
+# ----------------------------------------------------------------------------
+
+DHQ_VERSION=2023011402
+
+# location of dhqemu defaults
+DHQ_CONF="/usr/local/etc"
+
+# ----------------------------------------------------------------------------
+
+dh_header()
+{
+  cat <<_EOF_
+
+·▄▄▄▄         ▄▄·  ▄ .▄ ▄▄▄· ▄▄▄▄▄
+██▪ ██ ▪     ▐█ ▌▪██▪▐█▐█ ▀█ •██  
+▐█· ▐█▌ ▄█▀▄ ██ ▄▄██▀▐█▄█▀▀█  ▐█.▪
+██. ██ ▐█▌.▐▌▐███▌██▌▐▀▐█ ▪▐▌ ▐█▌·
+▀▀▀▀▀•  ▀█▄▀▪·▀▀▀ ▀▀▀ · ▀  ▀  ▀▀▀ 
+
+  DHQEMU Version: $DHQ_VERSION
+
+_EOF_
+}
+
+# ----------------------------------------------------------------------------
+
+dh_usage()
+{
+  cat <<_EOF_
+
+Usage: dhqemu command guestname [args]
+
+Where command is one of:
+
+  boot     :: power on guest
+  bootall  :: boot all guests defined to auto-start
+  iceboot  :: power on guest but in cpu suspend mode (see thaw below)
+  reset    :: issue qemu 'system_reset'
+  wake     :: issue qemu 'system_wakeup'
+  shut     :: issue qemu 'system_powerdown'
+  shutall  :: shutdown all guests managed by dhqemu
+  kill     :: immediately power off guest
+  killall  :: kill all guests managed by dhqemu
+  freeze   :: stop execution
+  thaw     :: continue execution
+  mon      :: connect to qemu monitor
+  list     :: list of dhqemu conf files
+  dir      :: show folder of guest
+  pid      :: shows list of running qemu instances
+  show     :: shows the qemu command line used to boot VM
+  backup   :: create backup archive of guest directory
+  delete   :: delete the guest folder, next boot will generate files
+  unplug   :: unplug device created with'plug' command
+
+commands with args:
+  clone  guestname newname             :: create new vm
+  plug   guestname /path/to/cdrom.iso  :: hot-plug usb drive, map to file
+  commit guestname [disknum]           :: commit change disk
+  revert guestname [disknum]           :: erase change disk and recreate
+  erase  guestname [disknum]           :: erase base disk and recreate
+
+_EOF_
+  exit 1
+}
+
+# ----------------------------------------------------------------------------
+
+dh_error()
+{
+  rm -f "$DHQ_LOCKFILE"
+  (( $1 == 0 )) && return
+  exitcode=$1
+  shift
+  echo 'dhqemu error:' ${@}
+  exit $exitcode
+}
+
+# ----------------------------------------------------------------------------
+
+dh_mklock()
+{
+  x=0
+  while [[ -f $DHQ_LOCKFILE ]]; do
+    echo "dhqemu: lock file exists - sleeping 2 seconds"
+    sleep 2
+    x=$(( $x + 1 ))
+
+    (( $x > 4 )) &&
+      dh_error 99 "dhqemu: unable to obtain lock. check for hung processes and/or delete $DHQ_LOCKFILE"
+  done
+  touch "$DHQ_LOCKFILE"
+  dh_error $? "unable to create lockfile $DHQ_LOCKFILE"
+}
+
+# ----------------------------------------------------------------------------
+
+dh_monitor()
+{
+  socat - "UNIX-CONNECT:$DHQ_VMDIR/monitor.sock"
+}
+
+# ----------------------------------------------------------------------------
+
+dh_runcheck()
+{
+  [[ -n $DHQ_UUID && -n $(/bin/ps xa | grep "uuid $DHQ_UUID" | grep -v grep) ]] &&
+    dh_error 99 "$DHQ_VMNAME ($DHQ_UUID) is running"
+}
+
+dh_noruncheck()
+{
+  [[ -n $DHQ_UUID && -z $(/bin/ps xa | grep "uuid $DHQ_UUID" | grep -v grep) ]] &&
+    dh_error 99 "$DHQ_VMNAME ($DHQ_UUID) is not running"
+}
+
+# ----------------------------------------------------------------------------
+
+dh_adjusthuge()
+{
+  x=$(( ($DHQ_MEM / 2) + 100 ))
+
+  if (( $x > 0 )); then
+
+    freehp=$(grep -E '^HugePages_Free' /proc/meminfo | awk '{ printf $NF }')
+
+    if (( $x > $freehp )); then
+
+      attempts=0
+      while true; do
+        curhp=$(cat /proc/sys/vm/nr_hugepages)
+        newhp=$(( $curhp + $x - $freehp ))
+
+        echo -n increasing kernel hugepage count from $curhp to $newhp...
+
+        echo $newhp >/proc/sys/vm/nr_hugepages
+        dh_error $? "attempt to set hugepages to $newhp failed"
+
+        freehp=$(grep -E '^HugePages_Free' /proc/meminfo | awk '{ printf $NF }')
+
+        if (( $freehp < $x )); then
+          attempts=$(( $attempts + 1 ))
+          if (( $attempts > 2 )); then
+            echo
+            dh_error 99 "failed to increase hugepages to $newhp"
+          else
+            echo failed. trying again
+            sleep 1
+          fi
+        else
+          break
+        fi
+      done
+
+      echo success
+      echo
+      grep -E '^HugePages' /proc/meminfo
+      echo
+    fi
+  fi
+}
+
+# ----------------------------------------------------------------------------
+
+dh_killswtpm()
+{
+  if [[ -f "$DHQ_VMDIR/swtpm.pid" ]]; then
+    swtpm_pid=$(cat $DHQ_VMDIR/swtpm.pid)
+    if [[ $(cat /proc/$swtpm_pid/comm) == swtpm ]]; then
+      kill -15 $swtpm_pid &>/dev/null
+      sleep 1
+      kill -9 $swtpm_pid &>/dev/null
+    fi
+  fi
+}
+
+# ----------------------------------------------------------------------------
+
+dh_kill()
+{
+  echo quit | dh_monitor
+  sleep 1
+
+  [[ -f "$DHQ_VMDIR/$DHQ_VMNAME.pid" ]] &&
+    kill -9 $(cat $DHQ_VMDIR/$DHQ_VMNAME.pid | head -1)
+}
+
+# ----------------------------------------------------------------------------
+
+dh_shutdown()
+{
+  y=0
+  while [[ $y -lt 2 ]]; do
+    if [[ -n $(echo info status | dh_monitor | grep -a paused) ]]; then
+      echo "Guest $NAME is asleep, attempting to wake..."
+      echo system_wakeup | dh_monitor
+      echo
+      sleep 5
+    fi
+
+    echo -n "Sending shutdown request to guest \"$DHQ_VMNAME\" ..."
+    echo system_powerdown | dh_monitor
+
+    echo
+    echo Waiting for system to shutdown for up to $DHQ_SHUTWAIT seconds
+
+    x=0
+    while [[ $x -lt $DHQ_SHUTWAIT ]]; do
+      if [[ -n $(/bin/ps xa | grep "uuid $UUID" | grep -v grep) ]]; then
+        echo System is still running for $x seconds...
+        sleep 1
+      else
+        return
+      fi
+      x=$(($x + 1))
+    done
+
+    if [[ -n $(/bin/ps xa | grep "uuid $DHQ_UUID" | grep -v grep) ]]; then
+      echo guest \"$DHQ_VMNAME\" has not gracefully shutdown
+    fi
+
+    y=$(($y + 1))
+  done
+
+  if [[ $y -ge 2 ]]; then
+    echo "guest $DHQ_VMNAME has ignored $y graceful shutdown requests"
+    dh_kill $DHQ_NAME
+  fi
+}
+
+# ----------------------------------------------------------------------------
+
+dh_backup()
+{
+  [[ ! -d $DHQ_VMDIR ]] &&
+    dh_error 99 "guest folder does not exist: $DHQ_VMDIR"
+
+  [[ -z $DHQ_CF ]] &&
+    dh_error 99 "compression filter is missing from $DHQ_CONF"
+
+  if [[ ! -d $DHQ_ARCHIVE ]]; then
+    mkdir "$DHQ_ARCHIVE"
+    dh_error $? "unable to create folder $DHQ_ARCHIVE"
+    chmod $DHQ_DPERM "$DHQ_ARCHIVE"
+  fi
+
+  echo
+  echo backup underway - do not start the VM until completed
+
+  tar -cvpf - "$DHQ_VMDIR" | $DHQ_CF >"$DHQ_ARCHIVE/$DHQ_VMNAME.dhqemu.tar.$DHQ_CFEXT"
+  dh_error $? "failed to create backup archive for $DHQ_VMNAME"
+
+  chown $DHQ_OG "$DHQ_ARCHIVE/$DHQ_VMNAME.dhqemu.tar.$DHQ_CFEXT"
+  chmod $DHQ_FPERM "$DHQ_ARCHIVE/$DHQ_VMNAME.dhqemu.tar.$DHQ_CFEXT"
+
+  echo
+  echo backup complete - it is now safe to start the vm
+}
+
+# ----------------------------------------------------------------------------
+
+dh_commit()
+{
+  x=0
+  while [[ -n "${DHQ_VDISK[$x]}" ]]; do
+    if [[ -n $1 && $1 -ne $x ]]; then
+      x=$(( $x + 1 ))
+      continue
+    fi
+
+    echo
+    echo flushing disk $DHQ_VMDIR/change$x.qcow2
+
+    qemu-img commit -b "$DHQ_VMDIR/base$x.raw" -p "$DHQ_VMDIR/change$x.qcow2"
+    dh_error $? "failed to flush vdisk $DHQ_VMDIR/change$x.qcow2"
+
+    rm -f "$DHQ_VMDIR/change$x.qcow2"
+    qemu-img create -f qcow2 -b "$DHQ_VMDIR/base$x.raw" -F raw "$DHQ_VMDIR/change$x.qcow2"
+    dh_error $? "error creating change disk $DHQ_VMDIR/change$x.qcow2"
+    chmod $DHQ_FPERM "$DHQ_VMDIR/change$x.qcow2"
+    x=$(( $x + 1 ))
+  done
+  echo success
+}
+
+# ----------------------------------------------------------------------------
+
+dh_revert()
+{
+  x=0
+  while [[ -n "${DHQ_VDISK[$x]}" ]]; do
+    if [[ -n $1 && $1 -ne $x ]]; then
+      x=$(( $x + 1 ))
+      continue
+    fi
+
+    rm -f "$DHQ_VMDIR/change$x.qcow2"
+    qemu-img create -f qcow2 -b "$DHQ_VMDIR/base$x.raw" -F raw "$DHQ_VMDIR/change$x.qcow2"
+    dh_error $? "error creating change disk $DHQ_VMDIR/change$x.qcow2"
+    chmod $DHQ_FPERM "$DHQ_VMDIR/change$x.qcow2"
+    x=$(( $x + 1 ))
+  done
+  echo success
+}
+
+# ----------------------------------------------------------------------------
+
+dh_erase()
+{
+  x=0
+  while [[ -n "${DHQ_VDISK[$x]}" ]]; do
+    if [[ -n $1 && $1 -ne $x ]]; then
+      x=$(( $x + 1 ))
+      continue
+    fi
+
+    rm -vf "$DHQ_VMDIR/base$x.raw"
+    rm -vf "$DHQ_VMDIR/change$x.qcow2"
+    x=$(( $x + 1 ))
+  done
+  echo success
+}
+
+# ----------------------------------------------------------------------------
+
+dh_launchswtpm()
+{
+  if [[ -f "$DHQ_VMDIR/swtpm.pid" ]]; then
+    swtpm_pid = $(cat $DHQ_VMDIR/swtpm.pid)
+    if [[ $(cat /proc/$swtpm_pid/comm) == swtpm ]]; then
+      echo software TPM emulator daemon is at pid $swtpm_pid
+      return
+    fi
+  fi
+
+  [[ ! -x $(type -p swtpm) ]] &&
+    dh_error 99 "$DHQ_VMNAME requests TPM emulation but swtpm is not installed"
+
+  nohup swtpm socket --terminate --daemon --tpm2 \
+    --tpmstate dir="$DHQ_VMDIR" \
+    --pid file="$DHQ_VMDIR/swtpm.pid" \
+    --ctrl type=unixio,path="$DHQ_VMDIR/swtpm.sock" \
+    --log file="$DHQ_VMDIR/swtpm.log",level=1,truncate &>/dev/null
+  dh_error $? "unable to start software tpm emulator service"
+
+  echo "Launched software TPM emulator for $DHQ_VMNAME (pid: $(cat $DHQ_VMDIR/swtpm.pid))"
+}
+
+# ----------------------------------------------------------------------------
+
+dh_createdisks()
+{
+  x=0
+  while [[ -n "${DHQ_VDISK[$x]}" ]]; do
+    if [[ ! -f "$DHQ_VMDIR/base${x}.raw" ]]; then
+      qemu-img create -f raw "$DHQ_VMDIR/base${x}.raw" ${DHQ_VDISK[$x]}
+      dh_error $? "unable to create disk #$x"
+      chmod $DHQ_FPERM "$DHQ_VMDIR/base${x}.raw"
+    fi
+
+    if [[ ! -f "$DHQ_VMDIR/change$x.qcow2" ]]; then
+      qemu-img create -f qcow2 -b "$DHQ_VMDIR/base$x.raw" -F raw "$DHQ_VMDIR/change$x.qcow2"
+      dh_error $? "unable to create change disk #$x"
+      chmod $DHQ_FPERM "$DHQ_VMDIR/change$x.qcow2"
+    fi
+    x=$(( $x + 1 ))
+  done
+}
+
+# ----------------------------------------------------------------------------
+
+dh_firstboot()
+{
+  mkdir "$DHQ_VMDIR"
+  dh_error $? "unable to create folder $DHQ_VMDIR"
+  chmod $DHQ_DPERM "$DHQ_VMDIR"
+
+  [[ $DHQ_UUID == "generate" || -z $DHQ_UUID ]] && DHQ_UUID=$(uuidgen -r)
+
+  echo DHQ_UUID=$DHQ_UUID >"$DHQ_VMDIR/persist.vars"
+  dh_error $? "unable to create $DHQ_VMDIR/persist.vars"
+  chmod $DHQ_FPERM "$DHQ_VMDIR/persist.vars"
+
+  x=0
+  while [[ -n ${DHQ_MAC[$x]} ]]; do
+    [[ ${DHQ_MAC[$x]} == "generate" ]] &&
+      DHQ_MAC[$x]=$(tr -dc A-F0-9 < /dev/urandom | head -c 10 | sed -r 's/(..)/\1:/g;s/:$//;s/^/02:/')
+    echo DHQ_MAC\[$x\]=${DHQ_MAC[$x]} >>"$DHQ_VMDIR/persist.vars"
+    x=$(( $x + 1 ))
+  done
+
+  if [[ $DHQ_BOOTMODE == "uefi" ]]; then
+    cp -v "$DHQ_NVRAM" "$DHQ_VMDIR/nvram.raw"
+    dh_error $? "failed to create nvram for $DHQ_VMNAME"
+    chmod $DHQ_FPERM "$DHQ_VMDIR/nvram.raw"
+  fi
+}
+
+# ----------------------------------------------------------------------------
+
+dh_preboot()
+{
+  [[ ! -d $DHQ_VMDIR ]] && dh_firstboot
+
+  [[ $DHQ_BOOTMODE == "uefi" ]] &&
+    DHQ_BOOT="-drive if=pflash,format=raw,readonly=on,file=$DHQ_FIRMWARE -drive if=pflash,format=raw,file=$DHQ_VMDIR/nvram.raw"
+
+  x=0
+  unset DHQ_DRVS DHQ_SC
+  while [[ -n "${DHQ_VDISK[$x]}" ]]; do
+    DHQ_DRVS="$DHQ_DRVS -drive id=vdisk${x},if=none,media=disk,cache=none,format=qcow2,aio=native,discard=unmap,file=$DHQ_VMDIR/change${x}.qcow2"
+    DHQ_SC="$DHQ_SC -device virtio-blk-pci,id=scont${x},drive=vdisk${x},scsi=off,config-wce=off,iothread=iot0,bootindex=$(( $x + 1 ))"
+    x=$(( $x + 1 ))
+  done
+  total_vdisks=$x
+
+  DHQ_VD="$DHQ_DRVS -object iothread,id=iot0 $DHQ_SC"
+
+  x=0
+  unset DHQ_CDS
+  while [[ -n "${DHQ_CD[$x]}" ]]; do
+    [[ ! -f "${DHQ_CD[$x]}" ]] &&
+      dh_error 99 "unable to read ${DHQ_CD[$x]}"
+
+    DHQ_CDS="$DHQ_CDS -drive id=cd$x,if=ide,index=$(( $x + 1 )),media=cdrom,cache=none,format=raw,readonly=on,file=${DHQ_CD[$x]}"
+    x=$(( $x + 1 ))
+  done
+
+  x=0
+  unset DHQ_VNET
+  while [[ -n "${DHQ_MAC[$x]}" ]]; do
+    [[ -z "${DHQ_BRIDGE[$x]}" ]] &&
+      dh_error 99 "no bridge device defined for nic #$x"
+    DHQ_VNET="$DHQ_VNET -netdev tap,id=vnic$x,script=no,downscript=no,br=${DHQ_BRIDGE[$x]} -device virtio-net-pci,netdev=vnic$x,mac=${DHQ_MAC[$x]}"
+    x=$(( $x + 1 ))
+  done
+
+  unset DHQ_TPM
+  [[ $DHQ_INSTALL_TPM == "true" ]] &&
+    DHQ_TPM="-chardev socket,id=chrtpm,path=$DHQ_VMDIR/swtpm.sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0"
+
+  DHQ_RAM="-m ${DHQ_MEM}M"
+  [[ $DHQ_HUGE == "true" ]] &&
+    DHQ_MACHINE="-object memory-backend-file,id=pc.ram,size=${DHQ_MEM}M,mem-path=$DHQ_HUGEMOUNT,prealloc=on,share=on $DHQ_MACHINE,memory-backend=pc.ram"
+
+  [[ $DHQ_INSTALL_VIDEO == "false" ]]   && unset DHQ_VIDEO
+  [[ $DHQ_INSTALL_SOUND == "false" ]]   && unset DHQ_SOUND
+  [[ $DHQ_INSTALL_USB == "false" ]]     && unset DHQ_USB
+  [[ $DHQ_INSTALL_BALLOON == "false" ]] && unset DHQ_BALLOON
+  [[ $DHQ_INSTALL_RNG == "false" ]]     && unset DHQ_RNG
+  [[ $DHQ_INSTALL_TABLET == "false" ]]  && unset DHQ_TABLET
+  [[ $DHQ_INSTALL_VNC == "false" ]]     && unset DHQ_VNC
+  [[ $DHQ_INSTALL_DISPLAY == "false" ]] && DHQ_DISPLAY="-display none"
+
+  if [[ $DHQ_INSTALL_SPICE == "true" ]]; then
+    [[ -z $DHQ_SPICE_PORT ]] && dh_error 99 "you must define DHQ_SPICE_PORT in $DHQ_CONFDIR/$DHQ_VMNAME.conf"
+    DHQ_SPICE=${DHQ_SPICE/SPICEPORT/$DHQ_SPICE_PORT}
+  else
+    unset DHQ_SPICE
+  fi
+
+  DHQ_CMD="$DHQ_SUSPEND -name $DHQ_VMNAME $DHQ_MACHINE $DHQ_LANG $DHQ_CPU $DHQ_RAM -uuid $DHQ_UUID -smbios type=1,serial=$DHQ_UUID,uuid=$DHQ_UUID,manufacturer=DocHat $DHQ_MISC $DHQ_BOOT $DHQ_VIDEO $DHQ_DISPLAY $DHQ_VD $DHQ_CDS $DHQ_VNET $DHQ_SOUND $DHQ_USB $DHQ_BALLOON $DHQ_RNG $DHQ_TABLET $DHQ_SPICE $DHQ_TPM $DHQ_VNC $DHQ_UARGS -pidfile $DHQ_VMDIR/$DHQ_VMNAME.pid -monitor unix:$DHQ_VMDIR/monitor.sock,server,nowait -daemonize"
+}
+
+# ----------------------------------------------------------------------------
+
+dh_showqemu()
+{
+  echo
+  echo QEMU command line for guest \"$DHQ_VMNAME\"
+  echo ----------------------------------------------------
+  echo
+  echo $DHQ_QEMUSYS $DHQ_SUSPEND \\
+  echo   -name $DHQ_VMNAME \\
+  echo   $DHQ_MACHINE $DHQ_LANG \\
+  echo   $DHQ_CPU $DHQ_RAM \\
+  echo   -uuid $DHQ_UUID \\
+  echo   -smbios type=1,serial=$DHQ_UUID,uuid=$DHQ_UUID \\
+  echo   $DHQ_MISC \\
+  echo   $DHQ_BOOT \\
+  [[ -n $DHQ_VIDEO ]] && echo  $DHQ_VIDEO \\
+  [[ -n $DHQ_DISPLAY ]] && echo  $DHQ_DISPLAY \\
+  [[ -n $DHQ_VD ]] && echo  $DHQ_VD \\
+  [[ -n $DHQ_CDS ]] && echo  $DHQ_CDS \\
+  [[ -n $DHQ_VNET ]] && echo  $DHQ_VNET \\
+  [[ -n $DHQ_SOUND ]] && echo  $DHQ_SOUND \\
+  [[ -n $DHQ_USB ]] && echo  $DHQ_USB \\
+  [[ -n $DHQ_BALLOON ]] && echo  $DHQ_BALLOON \\
+  [[ -n $DHQ_RNG ]] && echo  $DHQ_RNG \\
+  [[ -n $DHQ_TABLET ]] && echo  $DHQ_TABLET \\
+  [[ -n $DHQ_SPICE ]] && echo  $DHQ_SPICE \\
+  [[ -n $DHQ_TPM ]] && echo  $DHQ_TPM \\
+  [[ -n $DHQ_VNC ]] && echo  $DHQ_VNC \\
+  echo -pidfile $DHQ_VMDIR/$DHQ_VMNAME.pid \\
+  echo -monitor unix:$DHQ_VMDIR/monitor.sock,server,nowait \\
+  echo -daemonize
+  echo
+}
+
+# ----------------------------------------------------------------------------
+
+dh_boot()
+{
+  rm -f "$DHQ_VMDIR/$DHQ_VMNAME.pid" &>/dev/null
+
+  [[ $DHQ_INSTALL_TPM == "true" ]] && dh_launchswtpm
+
+  if [[ $DHQ_HUGE == "true" ]]; then
+    [[ ! -d $DHQ_HUGEMOUNT ]] && dh_error 99 "$DHQ_HUGEMOUNT does not exist. See https://www.linux-kvm.org/page/UsingLargePages"
+    dh_adjusthuge
+  fi
+
+  $DHQ_QEMUSYS $DHQ_CMD
+  dh_error $? "failed to boot guest"
+
+  [[ ! -f "$DHQ_VMDIR/$DHQ_VMNAME.pid" ]] &&
+    dh_error 99 "qemu did not create a pid file at $DHQ_VMDIR/$DHQ_VMNAME.pid"
+
+  DHQ_PID=$(cat "$DHQ_VMDIR/$DHQ_VMNAME.pid" |  head -1)
+
+  if [[ -n $DHQ_CPUNICE ]]; then
+    renice $DHQ_CPUNICE -p $DHQ_PID
+    dh_error $? "failed to renice with: renice $DHQ_CPUNICE -p $DHQ_PID"
+  fi
+ 
+  if [[ -n $DHQ_IONICE ]]; then
+    ionice $DHQ_IONICE -p $DHQ_PID
+    dh_error $? "failed to set IO priority"
+  fi
+
+  # Rename TAP devices and bind to appropriate bridge
+  x=0
+  while [[ -n ${DHQ_MAC[$x]} && ${DHQ_BRIDGE[$x]} && ${DHQ_MTU[$x]} ]]; do
+    ip link set name $DHQ_VMNAME-vnic$x tap$x
+    dh_error $? "unable to set tap device name"
+
+    ip link set up dev $DHQ_VMNAME-vnic$x
+    dh_error $? "unable to set tap device state to up"
+
+    ip link set mtu ${DHQ_MTU[$x]} dev $DHQ_VMNAME-vnic$x
+    dh_error $? "unable to set tap device mtu to ${DHQ_MTU[$x]}"
+
+    if [[ ${DHQ_BRIDGE[$x]} != none ]]; then
+      ip link set master ${DHQ_BRIDGE[$x]} dev $DHQ_VMNAME-vnic$x
+      dh_error $? "unable to set tap device $DHQ_VMNAME-vnic$x master to ${DHQ_BRIDGE[$x]}"
+    fi
+
+    x=$(( $x + 1 ))
+  done
+
+  echo Guest $DHQ_VMNAME has been started with $x virtual nics and $total_vdisks virtual disks.
+  echo
+}
+
+# ----------------------------------------------------------------------------
+
+dh_getconf()
+{
+  unset DHQ_VMNAME DHQ_VMDIR DHQ_UUID DHQ_MAC DHQ_BRIDGE DHQ_MTU DHQ_VDISK
+  source "$DHQ_CONF"
+  dh_error $? "unable to read conf file: $DHQ_CONF"
+}
+
+# ----------------------------------------------------------------------------
+
+dh_getguestconf()
+{
+  source "$DHQ_CONFDIR/$1.conf"
+  dh_error $? "unable to read $DHQ_CONFDIR/$1.conf"
+
+  [[ -z $DHQ_VMNAME ]] && dh_error 99 "DHQ_VMNAME is undefined"
+  [[ -z $DHQ_VMDIR ]] && DHQ_VMDIR="$DHQ_VMPATH/$DHQ_VMNAME"
+
+  source "$DHQ_VMDIR/persist.vars" &>/dev/null
+}
+
+# script begin
+# ----------------------------------------------------------------------------
+
+[[ ! -x $(type -p socat) ]] &&
+  dh_error 99 "this script requires socat"
+
+[[ ! -x $(type -p uuidgen) ]] &&
+  dh_error 99 "this script requires uuidgen"
+
+[[ -x $(type -p $DHQ_QEMUSYS) ]] &&
+  dh_error 99 "$DHQ_QEMUSYS not found"
+
+[[ $EUID -ne 0 ]] &&
+  dh_error 99 "this script is designed to run with root privilege"
+
+dh_getconf
+
+case $1 in
+  boot)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_runcheck
+    dh_mklock
+    dh_preboot
+    dh_createdisks
+    dh_showqemu
+    dh_boot
+    rm -f "$DHQ_LOCKFILE"
+    ;;
+  bootall)
+    [[ -z $DHQ_AUTO ]] && dh_error 99 "DHQ_AUTO is undefined in $DHQ_CONF"
+    for guest in $DHQ_AUTO; do
+      dh_getconf
+      dh_getguestconf $guest
+      if [[ -n $(/bin/ps xa | grep "uuid $DHQ_UUID" | grep -v grep) ]]; then
+        echo $guest is already running
+        continue
+      fi
+      dh_mklock
+      dh_preboot
+      dh_createdisks
+      dh_boot
+      rm -f "$DHQ_LOCKFILE"
+    done
+    ;;
+  iceboot)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_runcheck
+    dh_mklock
+    dh_preboot
+    dh_createdisks
+    DHQ_SUSPEND="-S"
+    dh_showqemu
+    dh_boot
+    rm -f "$DHQ_LOCKFILE"
+    ;;
+  show)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_preboot
+    dh_showqemu
+    ;;
+  reset|reboot)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_noruncheck
+    echo system_reset | dh_monitor
+    dh_error $? "unable to issue quit command"
+    echo success
+    ;;
+  freeze)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_noruncheck
+    echo stop | dh_monitor
+    dh_error $? "unable to issue freeze command"
+    echo success
+    ;;
+  thaw)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_noruncheck
+    echo cont | dh_monitor
+    dh_error $? "unable to issue continue command"
+    echo success
+    ;;
+  wake)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_noruncheck
+    echo system_wakeup | dh_monitor
+    dh_error $? "unable to issue system_wakeup"
+    echo success
+    ;;
+  shut|shutdown|poweroff)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_noruncheck
+    dh_shutdown
+    dh_killswtpm
+    ;;
+  shutall)
+    [[ -z $DHQ_AUTO ]] && dh_error 99 "DHQ_AUTO is undefined in $DHQ_CONF"
+    for guest in $DHQ_AUTO; do
+      dh_getguestconf $guest
+
+      if [[ -z $(/bin/ps xa | grep "uuid $DHQ_UUID" | grep -v grep) ]]; then
+        echo $guest is not running
+        continue
+      fi
+      dh_shutdown
+      dh_killswtpm
+    done
+    ;;
+  kill)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_noruncheck
+    echo quit | dh_monitor
+    dh_error $? "unable to issue quit command"
+    dh_killswtpm
+    echo success
+    ;;
+  killall)
+    [[ -z $DHQ_AUTO ]] && dh_error 99 "DHQ_AUTO is undefined in $DHQ_CONF"
+
+    for guest in $DHQ_AUTO; do
+      dh_getguestconf $guest
+      if [[ -z $(/bin/ps xa | grep "uuid $DHQ_UUID" | grep -v grep) ]]; then
+        echo $guest is not running
+        continue
+      fi
+      echo killing guest $guest
+      echo quit | dh_monitor
+      dh_error $? "unable to issue quit command"
+      dh_killswtpm
+    done
+    ;;
+  mon)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_noruncheck
+    dh_monitor
+    dh_error $? "unable to connect to qemu monitor socket"
+    ;;
+  list)
+    [[ -z "$(ls $DHQ_CONFDIR/*.conf)" ]] &&
+      dh_error 99 "no .conf files found in $DHQ_CONFDIR"
+
+    dh_header
+
+    echo
+    echo "vmname           uuid                                  path"
+    echo ---------------------------------------------------------------------------
+
+    for x in $DHQ_CONFDIR/*.conf; do
+      dh_getconf
+      source $x
+      dh_error $? "error reading $x"
+
+      dh_getguestconf $DHQ_VMNAME
+
+      [[ -z $DHQ_UUID ]] && DHQ_UUID="to-be-generated"
+      printf "%-15s  %-36s  %s\n" $DHQ_VMNAME $DHQ_UUID $DHQ_VMDIR
+    done
+    echo
+    ;;
+  pid)
+    ps -fC $DHQ_QEMUSYS
+    ;;
+  dir)
+    [[ -z "$2" ]] && dh_usage
+    dh_getconf
+    dh_getguestconf $2
+    echo folder location: $DHQ_VMDIR
+    echo -------------------------------------------------
+    ls -laF $DHQ_VMDIR
+    ;;
+  back|backup)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_runcheck
+    dh_backup
+    echo success
+    ;;
+  unplug)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_noruncheck
+    echo "device_del dhtemp0" | dh_monitor
+    dh_error $? "unable to issue device_del command"
+    echo success
+    ;;
+  plug|hotplug)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    [[ ! -f "$3" ]] &&
+      dh_error 99 "unable to access file: $3"
+    dh_noruncheck
+    printf "%s\n%s\n" "drive_add 0 if=none,id=dhplugdrv,file=$3" "device_add usb-storage,drive=dhplugdrv,id=dhtemp0" | dh_monitor
+    dh_error $? "unable to issue device_add command"
+    echo success
+    ;;
+  clone|copy)
+    [[ -z $2 || -z $3 ]] && dh_usage
+    cp -v "$DHQ_CONFDIR/$2.conf" "$DHQ_CONFDIR/$3.conf"
+    dh_error $? "unable to copy $2 to $3"
+    sed -i -e "/^DHQ_VMNAME=/ s/DHQ_VMNAME.*/DHQ_VMNAME=\"$3\"/" "$DHQ_CONFDIR/$3.conf"
+    dh_error $? "unable to update $3.conf name. please validate."
+    echo success
+    ;;
+  commit)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_runcheck
+    dh_commit $3
+    ;;
+  revert)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_runcheck
+    dh_revert $3
+    ;;
+  erase)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_runcheck
+    dh_erase $3
+    ;;
+  delete)
+    [[ -z "$2" ]] && dh_usage
+    dh_getguestconf $2
+    dh_runcheck
+
+    [[ ! -d $DHQ_VMDIR ]] && dh_error 99 "$DHQ_VMDIR does not exist"
+
+    rm -rvf "$DHQ_VMDIR"
+    dh_error $? "unable to remove folder $DHQ_VMDIR"
+    echo success
+    ;;
+  *)
+    dh_header
+    dh_usage
+    ;;
+esac
+
+exit 0
