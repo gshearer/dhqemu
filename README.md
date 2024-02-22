@@ -9,13 +9,11 @@
 
 DHQEMU - Thin hypervisor implemented with #!/bin/bash
 
-Hello!
-------
+## HELLO!
 
 This is a thin hypervisor written in bash. It directly invokes QEMU with KVM features. See below:
 
-Usage
------
+## Usage
 
 Usage: dhqemu command guestname [args]
 
