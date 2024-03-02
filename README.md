@@ -1,5 +1,14 @@
 # dhqemu
 
+    ▄▄▌ ▐ ▄▌ ▄ .▄▄▄▄ . ▐ ▄ • ▌ ▄ ·.              ▐ ▄ 
+    ██· █▌▐███▪▐█▀▄.▀·•█▌▐█·██ ▐███▪▪     ▪     •█▌▐█
+    ██▪▐█▐▐▌██▀▐█▐▀▀▪▄▐█▐▐▌▐█ ▌▐▌▐█· ▄█▀▄  ▄█▀▄ ▐█▐▐▌
+    ▐█▌██▐█▌██▌▐▀▐█▄▄▌██▐█▌██ ██▌▐█▌▐█▌.▐▌▐█▌.▐▌██▐█▌
+     ▀▀▀▀ ▀▪▀▀▀ · ▀▀▀ ▀▀ █▪▀▀  █▪▀▀▀ ▀█▄▀▪ ▀█▄▀▪▀▀ █▪
+
+              Cryptocurrency Trading Bot
+     Written by George Shearer (george@shearer.tech)
+
 
   ·▄▄▄▄         ▄▄·  ▄ .▄ ▄▄▄· ▄▄▄▄▄
   ██▪ ██ ▪     ▐█ ▌▪██▪▐█▐█ ▀█ •██
@@ -9,12 +18,16 @@
 
 DHQEMU - Thin hypervisor implemented with #!/bin/bash
 
-## HELLO!
+
+Hello!
+------
 
 This is a thin hypervisor written in bash. It directly invokes QEMU with KVM features.
 
 Features:
 
+* simple command line
+* implementd completely in bash - nothing resident
 * global and per-guest config
 * automatic adjustment of kernel hugepages
 * automatic start/stop of TPM emulater daemon
@@ -25,8 +38,6 @@ Features:
 * hotplug usb devices
 * systemd integration for stopping or starting vms with system
 * simple one file backups of all necessary files for each VM
-
-## Usage
 
 ·▄▄▄▄         ▄▄·  ▄ .▄ ▄▄▄· ▄▄▄▄▄
 ██▪ ██ ▪     ▐█ ▌▪██▪▐█▐█ ▀█ •██  
