@@ -1,16 +1,15 @@
 #!/bin/bash
 
-# DocHat QEMU Script
-# written by george@shearer.tech
-
-# designed on ArchLinux but should work on most modern distros
+# DocHat QEMU
+# A skinny hypervisor implemented in #!/bin/bash
+# Written by George Shearer <george@shearer.tech>
 
 # ----------------------------------------------------------------------------
 
-DHQ_VERSION=2023011402
+DHQ_VERSION=2024030101
 
-# location of dhqemu defaults
-DHQ_CONF="/usr/local/etc"
+# paths that will be searched for dhqemu.conf
+DHQ_SEARCH="$XDG_CONFIG_HOME/dhqemu $HOME/.config/dhqemu /etc /usr/local/etc"
 
 # ----------------------------------------------------------------------------
 
@@ -24,7 +23,10 @@ dh_header()
 ██. ██ ▐█▌.▐▌▐███▌██▌▐▀▐█ ▪▐▌ ▐█▌·
 ▀▀▀▀▀•  ▀█▄▀▪·▀▀▀ ▀▀▀ · ▀  ▀  ▀▀▀ 
 
-  DHQEMU Version: $DHQ_VERSION
+   DHQEMU Version: $DHQ_VERSION
+
+    Written by George Shearer
+       george@shearer.tech
 
 _EOF_
 }
@@ -72,13 +74,32 @@ _EOF_
 
 # ----------------------------------------------------------------------------
 
+dh_killswtpm()
+{
+  if [[ -f "$DHQ_VMPATH/$DHQ_VMNAME/swtpm.pid" ]]; then
+    swtpm_pid=$(cat $DHQ_VMPATH/$DHQ_VMNAME/swtpm.pid)
+    if [[ $(cat /proc/$swtpm_pid/comm) == swtpm ]]; then
+      echo Stopping swtpm PID $swtpm_pid
+      kill -15 $swtpm_pid &>/dev/null
+      sleep 1
+      kill -9 $swtpm_pid &>/dev/null
+    fi
+  fi
+}
+
+# ----------------------------------------------------------------------------
+
 dh_error()
 {
-  rm -f "$DHQ_LOCKFILE"
   (( $1 == 0 )) && return
+  rm -f "$DHQ_LOCKFILE"
   exitcode=$1
   shift
-  echo 'dhqemu error:' ${@}
+  if (( $exitcode != 99 )); then
+    echo "dhqemu error ($exitcode): ${@}"
+  else
+    echo "dhqemu error: ${@}"
+  fi
   exit $exitcode
 }
 
@@ -103,27 +124,31 @@ dh_mklock()
 
 dh_monitor()
 {
-  socat - "UNIX-CONNECT:$DHQ_VMDIR/monitor.sock"
+  socat - "UNIX-CONNECT:$DHQ_VMPATH/$DHQ_VMNAME/monitor.sock"
 }
 
 # ----------------------------------------------------------------------------
 
 dh_runcheck()
 {
-  [[ -n $DHQ_UUID && -n $(/bin/ps xa | grep "uuid $DHQ_UUID" | grep -v grep) ]] &&
-    dh_error 99 "$DHQ_VMNAME ($DHQ_UUID) is running"
-}
+  local isrunning=false
 
-dh_noruncheck()
-{
-  [[ -n $DHQ_UUID && -z $(/bin/ps xa | grep "uuid $DHQ_UUID" | grep -v grep) ]] &&
-    dh_error 99 "$DHQ_VMNAME ($DHQ_UUID) is not running"
+  [[ -n $DHQ_UUID && -n $(/bin/ps xa | grep "uuid $DHQ_UUID" | grep -v grep) ]] &&
+    isrunning=true
+
+  [[ $1 == "run" && $isrunning == "true" ]] &&
+    dh_error 99 "$DHQ_VMNAME ($DHQ_UUID) is running"
+
+  [[ $1 == "norun" && $isrunning == "false" ]] &&
+    dh_error 99 "$DHQ_VMNAME ($DHQUUID) is not running"
 }
 
 # ----------------------------------------------------------------------------
 
 dh_adjusthuge()
 {
+  local x freehp curhp newhp attempts
+
   x=$(( ($DHQ_MEM / 2) + 100 ))
 
   if (( $x > 0 )); then
@@ -168,37 +193,24 @@ dh_adjusthuge()
 
 # ----------------------------------------------------------------------------
 
-dh_killswtpm()
-{
-  if [[ -f "$DHQ_VMDIR/swtpm.pid" ]]; then
-    swtpm_pid=$(cat $DHQ_VMDIR/swtpm.pid)
-    if [[ $(cat /proc/$swtpm_pid/comm) == swtpm ]]; then
-      kill -15 $swtpm_pid &>/dev/null
-      sleep 1
-      kill -9 $swtpm_pid &>/dev/null
-    fi
-  fi
-}
-
-# ----------------------------------------------------------------------------
-
 dh_kill()
 {
   echo quit | dh_monitor
   sleep 1
 
-  [[ -f "$DHQ_VMDIR/$DHQ_VMNAME.pid" ]] &&
-    kill -9 $(cat $DHQ_VMDIR/$DHQ_VMNAME.pid | head -1)
+  [[ -f "$DHQ_VMPATH/$DHQ_VMNAME.pid" ]] &&
+    kill -9 $(cat $DHQ_VMPATH/$DHQ_VMNAME/$DHQ_VMNAME.pid | head -1)
 }
 
 # ----------------------------------------------------------------------------
 
 dh_shutdown()
 {
-  y=0
+  local x=0 y=0
+
   while [[ $y -lt 2 ]]; do
     if [[ -n $(echo info status | dh_monitor | grep -a paused) ]]; then
-      echo "Guest $NAME is asleep, attempting to wake..."
+      echo "Guest $DHQ_VMNAME is asleep, attempting to wake..."
       echo system_wakeup | dh_monitor
       echo
       sleep 5
@@ -230,7 +242,7 @@ dh_shutdown()
 
   if [[ $y -ge 2 ]]; then
     echo "guest $DHQ_VMNAME has ignored $y graceful shutdown requests"
-    dh_kill $DHQ_NAME
+    dh_kill $DHQ_VMNAME
   fi
 }
 
@@ -238,25 +250,21 @@ dh_shutdown()
 
 dh_backup()
 {
-  [[ ! -d $DHQ_VMDIR ]] &&
-    dh_error 99 "guest folder does not exist: $DHQ_VMDIR"
+  [[ ! -d "$DHQ_VMPATH/$DHQ_VMNAME" ]] &&
+    dh_error 99 "guest folder does not exist: $DHQ_VMPATH/$DHQ_VMNAME"
 
-  [[ -z $DHQ_CF ]] &&
-    dh_error 99 "compression filter is missing from $DHQ_CONF"
-
-  if [[ ! -d $DHQ_ARCHIVE ]]; then
-    mkdir "$DHQ_ARCHIVE"
-    dh_error $? "unable to create folder $DHQ_ARCHIVE"
+  if [[ ! -d "$DHQ_BACKUPPATH" ]]; then
+    mkdir "$DHQ_BACKUPPATH"
+    dh_error $? "unable to create folder $DHQ_BACKUPPATH"
     chmod $DHQ_DPERM "$DHQ_ARCHIVE"
   fi
 
   echo
   echo backup underway - do not start the VM until completed
 
-  tar -cvpf - "$DHQ_VMDIR" | $DHQ_CF >"$DHQ_ARCHIVE/$DHQ_VMNAME.dhqemu.tar.$DHQ_CFEXT"
+  tar -cvpf - "$DHQ_VMPATH/$DHQ_VMNAME" | $DHQ_CF >"$DHQ_ARCHIVE/$DHQ_VMNAME.dhqemu.tar.$DHQ_CFEXT"
   dh_error $? "failed to create backup archive for $DHQ_VMNAME"
 
-  chown $DHQ_OG "$DHQ_ARCHIVE/$DHQ_VMNAME.dhqemu.tar.$DHQ_CFEXT"
   chmod $DHQ_FPERM "$DHQ_ARCHIVE/$DHQ_VMNAME.dhqemu.tar.$DHQ_CFEXT"
 
   echo
@@ -274,16 +282,15 @@ dh_commit()
       continue
     fi
 
-    echo
-    echo flushing disk $DHQ_VMDIR/change$x.qcow2
+    echo -e "\nflushing disk $DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2"
 
-    qemu-img commit -b "$DHQ_VMDIR/base$x.raw" -p "$DHQ_VMDIR/change$x.qcow2"
-    dh_error $? "failed to flush vdisk $DHQ_VMDIR/change$x.qcow2"
+    qemu-img commit -b "$DHQ_VMPATH/$DHQ_VMNAME/base$x.raw" -p "$DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2"
+    dh_error $? "failed to flush vdisk $DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2"
 
-    rm -f "$DHQ_VMDIR/change$x.qcow2"
-    qemu-img create -f qcow2 -b "$DHQ_VMDIR/base$x.raw" -F raw "$DHQ_VMDIR/change$x.qcow2"
-    dh_error $? "error creating change disk $DHQ_VMDIR/change$x.qcow2"
-    chmod $DHQ_FPERM "$DHQ_VMDIR/change$x.qcow2"
+    rm -f "$DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2"
+    qemu-img create -f qcow2 -b "$DHQ_VMPATH/$DHQ_VMNAME/base$x.raw" -F raw "$DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2"
+    dh_error $? "error creating change disk $DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2"
+    chmod $DHQ_FPERM "$DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2"
     x=$(( $x + 1 ))
   done
   echo success
@@ -300,10 +307,11 @@ dh_revert()
       continue
     fi
 
-    rm -f "$DHQ_VMDIR/change$x.qcow2"
-    qemu-img create -f qcow2 -b "$DHQ_VMDIR/base$x.raw" -F raw "$DHQ_VMDIR/change$x.qcow2"
-    dh_error $? "error creating change disk $DHQ_VMDIR/change$x.qcow2"
-    chmod $DHQ_FPERM "$DHQ_VMDIR/change$x.qcow2"
+    rm -f "$DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2"
+    qemu-img create -f qcow2 -b "$DHQ_VMPATH/$DHQ_VMNAME/base$x.raw" -F raw "$DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2"
+    dh_error $? "error creating change disk $DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2"
+    chmod $DHQ_FPERM "$DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2"
+
     x=$(( $x + 1 ))
   done
   echo success
@@ -320,8 +328,8 @@ dh_erase()
       continue
     fi
 
-    rm -vf "$DHQ_VMDIR/base$x.raw"
-    rm -vf "$DHQ_VMDIR/change$x.qcow2"
+    rm -vf "$DHQ_VMPATH/$DHQ_VMNAME/base$x.raw"
+    rm -vf "$DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2"
     x=$(( $x + 1 ))
   done
   echo success
@@ -331,8 +339,8 @@ dh_erase()
 
 dh_launchswtpm()
 {
-  if [[ -f "$DHQ_VMDIR/swtpm.pid" ]]; then
-    swtpm_pid = $(cat $DHQ_VMDIR/swtpm.pid)
+  if [[ -f "$DHQ_VMPATH/$DHQ_VMNAME/swtpm.pid" ]]; then
+    swtpm_pid = $(cat $DHQ_VMPATH/$DHQ_VMNAME/swtpm.pid)
     if [[ $(cat /proc/$swtpm_pid/comm) == swtpm ]]; then
       echo software TPM emulator daemon is at pid $swtpm_pid
       return
@@ -341,33 +349,33 @@ dh_launchswtpm()
 
   [[ ! -x $(type -p swtpm) ]] &&
     dh_error 99 "$DHQ_VMNAME requests TPM emulation but swtpm is not installed"
-
   nohup swtpm socket --terminate --daemon --tpm2 \
-    --tpmstate dir="$DHQ_VMDIR" \
-    --pid file="$DHQ_VMDIR/swtpm.pid" \
-    --ctrl type=unixio,path="$DHQ_VMDIR/swtpm.sock" \
-    --log file="$DHQ_VMDIR/swtpm.log",level=1,truncate &>/dev/null
+    --tpmstate dir="$DHQ_VMPATH/$DHQ_VMNAME" \
+    --pid file="$DHQ_VMPATH/$DHQ_VMNAME/swtpm.pid" \
+    --ctrl type=unixio,path="$DHQ_VMPATH/$DHQ_VMNAME/swtpm.sock" \
+    --log file="$DHQ_VMPATH/$DHQ_VMNAME/swtpm.log",level=1,truncate &>/dev/null
   dh_error $? "unable to start software tpm emulator service"
 
-  echo "Launched software TPM emulator for $DHQ_VMNAME (pid: $(cat $DHQ_VMDIR/swtpm.pid))"
+  echo "Launched software TPM emulator for $DHQ_VMNAME (pid: $(cat $DHQ_VMPATH/$DHQ_VMNAME/swtpm.pid))"
 }
 
 # ----------------------------------------------------------------------------
 
 dh_createdisks()
 {
-  x=0
+  local x=0
+
   while [[ -n "${DHQ_VDISK[$x]}" ]]; do
-    if [[ ! -f "$DHQ_VMDIR/base${x}.raw" ]]; then
-      qemu-img create -f raw "$DHQ_VMDIR/base${x}.raw" ${DHQ_VDISK[$x]}
+    if [[ ! -f "$DHQ_VMPATH/$DHQ_VMNAME/base${x}.raw" ]]; then
+      qemu-img create -f raw "$DHQ_VMPATH/$DHQ_VMNAME/base${x}.raw" ${DHQ_VDISK[$x]}
       dh_error $? "unable to create disk #$x"
-      chmod $DHQ_FPERM "$DHQ_VMDIR/base${x}.raw"
+      chmod $DHQ_FPERM "$DHQ_VMPATH/$DHQ_VMNAME/base${x}.raw"
     fi
 
-    if [[ ! -f "$DHQ_VMDIR/change$x.qcow2" ]]; then
-      qemu-img create -f qcow2 -b "$DHQ_VMDIR/base$x.raw" -F raw "$DHQ_VMDIR/change$x.qcow2"
+    if [[ ! -f "$DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2" ]]; then
+      qemu-img create -f qcow2 -b "$DHQ_VMPATH/$DHQ_VMNAME/base$x.raw" -F raw "$DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2"
       dh_error $? "unable to create change disk #$x"
-      chmod $DHQ_FPERM "$DHQ_VMDIR/change$x.qcow2"
+      chmod $DHQ_FPERM "$DHQ_VMPATH/$DHQ_VMNAME/change$x.qcow2"
     fi
     x=$(( $x + 1 ))
   done
@@ -377,28 +385,29 @@ dh_createdisks()
 
 dh_firstboot()
 {
-  mkdir "$DHQ_VMDIR"
-  dh_error $? "unable to create folder $DHQ_VMDIR"
-  chmod $DHQ_DPERM "$DHQ_VMDIR"
+  local x=0 ethmacs=""
+
+  mkdir "$DHQ_VMPATH/$DHQ_VMNAME"
+  dh_error $? "unable to create folder $DHQ_VMPATH/$DHQ_VMNAME"
+  chmod $DHQ_DPERM "$DHQ_VMPATH/$DHQ_VMDIR"
 
   [[ $DHQ_UUID == "generate" || -z $DHQ_UUID ]] && DHQ_UUID=$(uuidgen -r)
 
-  echo DHQ_UUID=$DHQ_UUID >"$DHQ_VMDIR/persist.vars"
-  dh_error $? "unable to create $DHQ_VMDIR/persist.vars"
-  chmod $DHQ_FPERM "$DHQ_VMDIR/persist.vars"
+  echo DHQ_UUID=$DHQ_UUID >"$DHQ_VMPATH/$DHQ_VMNAME/persist.vars"
+  dh_error $? "unable to create $DHQ_VMPATH/$DHQ_VMNAME/persist.vars"
+  chmod $DHQ_FPERM "$DHQ_VMPATH/$DHQ_VMNAME/persist.vars"
 
-  x=0
   while [[ -n ${DHQ_MAC[$x]} ]]; do
     [[ ${DHQ_MAC[$x]} == "generate" ]] &&
       DHQ_MAC[$x]=$(tr -dc A-F0-9 < /dev/urandom | head -c 10 | sed -r 's/(..)/\1:/g;s/:$//;s/^/02:/')
-    echo DHQ_MAC\[$x\]=${DHQ_MAC[$x]} >>"$DHQ_VMDIR/persist.vars"
+    echo DHQ_MAC\[$x\]=${DHQ_MAC[$x]} >>"$DHQ_VMPATH/$DHQ_VMNAME/persist.vars"
     x=$(( $x + 1 ))
   done
 
-  if [[ $DHQ_BOOTMODE == "uefi" ]]; then
-    cp -v "$DHQ_NVRAM" "$DHQ_VMDIR/nvram.raw"
+  if [[ $DHQ_FIRMWARE != "bios" ]]; then
+    cp -v "$DHQ_NVRAM" "$DHQ_VMPATH/$DHQ_VMNAME/nvram.raw"
     dh_error $? "failed to create nvram for $DHQ_VMNAME"
-    chmod $DHQ_FPERM "$DHQ_VMDIR/nvram.raw"
+    chmod $DHQ_FPERM "$DHQ_VMPATH/$DHQ_VMNAME/nvram.raw"
   fi
 }
 
@@ -406,66 +415,58 @@ dh_firstboot()
 
 dh_preboot()
 {
-  [[ ! -d $DHQ_VMDIR ]] && dh_firstboot
+  local x=0 drives="" iots="" total_vdisks=0 blockconts="" optical="" boot="" tpm="" ram="" vnics="" spice="" cpu=""
 
-  [[ $DHQ_BOOTMODE == "uefi" ]] &&
-    DHQ_BOOT="-drive if=pflash,format=raw,readonly=on,file=$DHQ_FIRMWARE -drive if=pflash,format=raw,file=$DHQ_VMDIR/nvram.raw"
+  [[ ! -d "$DHQ_VMPATH/$DHQ_VMNAME" ]] && dh_firstboot
 
-  x=0
-  unset DHQ_DRVS DHQ_SC
+  [[ $DHQ_FIRMWARE != "bios" ]] &&
+    drives="-drive id=pflash0,if=pflash,format=raw,readonly=on,file=$DHQ_FIRMWARE -drive id=pflash1,if=pflash,format=raw,file=$DHQ_VMPATH/$DHQ_VMNAME/nvram.raw"
+
   while [[ -n "${DHQ_VDISK[$x]}" ]]; do
-    DHQ_DRVS="$DHQ_DRVS -drive id=vdisk${x},if=none,media=disk,cache=none,format=qcow2,aio=native,discard=unmap,file=$DHQ_VMDIR/change${x}.qcow2"
-    DHQ_SC="$DHQ_SC -device virtio-blk-pci,id=scont${x},drive=vdisk${x},scsi=off,config-wce=off,iothread=iot0,bootindex=$(( $x + 1 ))"
+    drives="$drives -drive id=vdisk${x},if=none,media=disk,cache=unsafe,format=qcow2,aio=io_uring,discard=unmap,file=$DHQ_VMPATH/$DHQ_VMNAME/change${x}.qcow2"
+    blockconts="$blockconts -device virtio-blk-pci,id=bcont${x},drive=vdisk${x},scsi=off,config-wce=off,iothread=iot${x},bootindex=$(( $x + 1 ))"
+    iots="$iots -object iothread,id=iot${x}"
     x=$(( $x + 1 ))
   done
   total_vdisks=$x
 
-  DHQ_VD="$DHQ_DRVS -object iothread,id=iot0 $DHQ_SC"
-
   x=0
-  unset DHQ_CDS
   while [[ -n "${DHQ_CD[$x]}" ]]; do
     [[ ! -f "${DHQ_CD[$x]}" ]] &&
       dh_error 99 "unable to read ${DHQ_CD[$x]}"
-
-    DHQ_CDS="$DHQ_CDS -drive id=cd$x,if=ide,index=$(( $x + 1 )),media=cdrom,cache=none,format=raw,readonly=on,file=${DHQ_CD[$x]}"
+    optical="$optical -drive id=cd$x,if=ide,index=$(( $x + 1 )),media=cdrom,cache=none,format=raw,readonly=on,file=${DHQ_CD[$x]}"
     x=$(( $x + 1 ))
   done
 
   x=0
-  unset DHQ_VNET
   while [[ -n "${DHQ_MAC[$x]}" ]]; do
     [[ -z "${DHQ_BRIDGE[$x]}" ]] &&
       dh_error 99 "no bridge device defined for nic #$x"
-    DHQ_VNET="$DHQ_VNET -netdev tap,id=vnic$x,script=no,downscript=no,br=${DHQ_BRIDGE[$x]} -device virtio-net-pci,netdev=vnic$x,mac=${DHQ_MAC[$x]}"
+    vnics="$vnics -netdev tap,id=vnic$x,script=no,downscript=no,br=${DHQ_BRIDGE[$x]} -device virtio-net-pci,netdev=vnic$x,mac=${DHQ_MAC[$x]}"
     x=$(( $x + 1 ))
   done
 
-  unset DHQ_TPM
-  [[ $DHQ_INSTALL_TPM == "true" ]] &&
-    DHQ_TPM="-chardev socket,id=chrtpm,path=$DHQ_VMDIR/swtpm.sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0"
-
-  DHQ_RAM="-m ${DHQ_MEM}M"
-  [[ $DHQ_HUGE == "true" ]] &&
-    DHQ_MACHINE="-object memory-backend-file,id=pc.ram,size=${DHQ_MEM}M,mem-path=$DHQ_HUGEMOUNT,prealloc=on,share=on $DHQ_MACHINE,memory-backend=pc.ram"
-
-  [[ $DHQ_INSTALL_VIDEO == "false" ]]   && unset DHQ_VIDEO
-  [[ $DHQ_INSTALL_SOUND == "false" ]]   && unset DHQ_SOUND
-  [[ $DHQ_INSTALL_USB == "false" ]]     && unset DHQ_USB
-  [[ $DHQ_INSTALL_BALLOON == "false" ]] && unset DHQ_BALLOON
-  [[ $DHQ_INSTALL_RNG == "false" ]]     && unset DHQ_RNG
-  [[ $DHQ_INSTALL_TABLET == "false" ]]  && unset DHQ_TABLET
-  [[ $DHQ_INSTALL_VNC == "false" ]]     && unset DHQ_VNC
-  [[ $DHQ_INSTALL_DISPLAY == "false" ]] && DHQ_DISPLAY="-display none"
-
-  if [[ $DHQ_INSTALL_SPICE == "true" ]]; then
-    [[ -z $DHQ_SPICE_PORT ]] && dh_error 99 "you must define DHQ_SPICE_PORT in $DHQ_CONFDIR/$DHQ_VMNAME.conf"
-    DHQ_SPICE=${DHQ_SPICE/SPICEPORT/$DHQ_SPICE_PORT}
+  ram="-m size=${DHQ_MEM}M"
+  if [[ $DHQ_HUGE == "true" ]]; then
+    ram="$ram -object memory-backend-file,id=pc.ram,size=${DHQ_MEM}M,mem-path=/dev/hugepages,prealloc=on,share=on"
   else
-    unset DHQ_SPICE
+    ram="$ram -object memory-backend-ram,id=pc.ram,size=${DHQ_MEM}M"
   fi
 
-  DHQ_CMD="$DHQ_SUSPEND -name $DHQ_VMNAME $DHQ_MACHINE $DHQ_LANG $DHQ_CPU $DHQ_RAM -uuid $DHQ_UUID -smbios type=1,serial=$DHQ_UUID,uuid=$DHQ_UUID,manufacturer=DocHat $DHQ_MISC $DHQ_BOOT $DHQ_VIDEO $DHQ_DISPLAY $DHQ_VD $DHQ_CDS $DHQ_VNET $DHQ_SOUND $DHQ_USB $DHQ_BALLOON $DHQ_RNG $DHQ_TABLET $DHQ_SPICE $DHQ_TPM $DHQ_VNC $DHQ_UARGS -pidfile $DHQ_VMDIR/$DHQ_VMNAME.pid -monitor unix:$DHQ_VMDIR/monitor.sock,server,nowait -daemonize"
+  if [[ -z $DHQ_CPU ]]; then
+    x=$(nproc)
+    (( $x > 3 )) && x=$(( $x - 2 ))
+    cpu="-cpu host -smp ${x},sockets=1,dies=1,cores=${x},threads=1"
+  else
+    cpu=$DHQ_CPU
+  fi
+
+  [[ $DHQ_TPM == "true" ]] &&
+    tpm="-chardev socket,id=chrtpm,path=$DHQ_VMPATH/$DHQ_VMNAME/swtpm.sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0"
+
+  DHQ_CMD="$DHQ_PREPEND $DHQ_QEMUCMD -name $DHQ_VMNAME $DHQ_MACHINE -uuid $DHQ_UUID $DHQ_SUSPEND -smbios type=1,manufacturer=DocHat,product=DHQEMU,version=$DHQ_VERSION,serial=$DHQ_UUID,uuid=$DHQ_UUID $cpu $ram $DHQ_GLOBAL $DHQ_MISC $DHQ_RTC $DHQ_BOOTSEQ $DHQ_DISPLAY $DHQ_AUDIO $iots $drives $blockconts $optical $DHQ_VIDEO $DHQ_SOUND $DHQ_BALLOON $DHQ_RNG $DHQ_USB $DHQ_SERIAL $DHQ_TABLET $tpm $vnics $DHQ_SPICE $DHQ_SPICEAGENT $DHQ_SPICEREDIR $DHQ_VNC -pidfile $DHQ_VMPATH/$DHQ_VMNAME/$DHQ_VMNAME.pid -monitor unix:$DHQ_VMPATH/$DHQ_VMNAME/monitor.sock,server,nowait $DHQ_APPEND -daemonize"
+
+#  DHQ_CMD="$DHQ_SUSPEND -name $DHQ_VMNAME $DHQ_MACHINE $DHQ_LANG $DHQ_CPU $DHQ_RAM -uuid $DHQ_UUID -smbios type=1,serial=$DHQ_UUID,uuid=$DHQ_UUID,manufacturer=DocHat $DHQ_MISC $DHQ_BOOT $DHQ_VIDEO $DHQ_DISPLAY $DHQ_VD $DHQ_CDS $DHQ_VNET $DHQ_SOUND $DHQ_USB $DHQ_BALLOON $DHQ_RNG $DHQ_TABLET $DHQ_SPICE $DHQ_TPM $DHQ_VNC $DHQ_UARGS -pidfile $DHQ_VMPATH/$DHQ_VMNAME/$DHQ_VMNAME.pid -monitor unix:$DHQ_VMPATH/$DHQ_VMNAME/monitor.sock,server,nowait -daemonize"
 }
 
 # ----------------------------------------------------------------------------
@@ -474,55 +475,36 @@ dh_showqemu()
 {
   echo
   echo QEMU command line for guest \"$DHQ_VMNAME\"
-  echo ----------------------------------------------------
+  echo -----------------------------------------------------------------------
   echo
-  echo $DHQ_QEMUSYS $DHQ_SUSPEND \\
-  echo   -name $DHQ_VMNAME \\
-  echo   $DHQ_MACHINE $DHQ_LANG \\
-  echo   $DHQ_CPU $DHQ_RAM \\
-  echo   -uuid $DHQ_UUID \\
-  echo   -smbios type=1,serial=$DHQ_UUID,uuid=$DHQ_UUID \\
-  echo   $DHQ_MISC \\
-  echo   $DHQ_BOOT \\
-  [[ -n $DHQ_VIDEO ]] && echo  $DHQ_VIDEO \\
-  [[ -n $DHQ_DISPLAY ]] && echo  $DHQ_DISPLAY \\
-  [[ -n $DHQ_VD ]] && echo  $DHQ_VD \\
-  [[ -n $DHQ_CDS ]] && echo  $DHQ_CDS \\
-  [[ -n $DHQ_VNET ]] && echo  $DHQ_VNET \\
-  [[ -n $DHQ_SOUND ]] && echo  $DHQ_SOUND \\
-  [[ -n $DHQ_USB ]] && echo  $DHQ_USB \\
-  [[ -n $DHQ_BALLOON ]] && echo  $DHQ_BALLOON \\
-  [[ -n $DHQ_RNG ]] && echo  $DHQ_RNG \\
-  [[ -n $DHQ_TABLET ]] && echo  $DHQ_TABLET \\
-  [[ -n $DHQ_SPICE ]] && echo  $DHQ_SPICE \\
-  [[ -n $DHQ_TPM ]] && echo  $DHQ_TPM \\
-  [[ -n $DHQ_VNC ]] && echo  $DHQ_VNC \\
-  echo -pidfile $DHQ_VMDIR/$DHQ_VMNAME.pid \\
-  echo -monitor unix:$DHQ_VMDIR/monitor.sock,server,nowait \\
-  echo -daemonize
+  echo $DHQ_CMD
   echo
+  echo -----------------------------------------------------------------------
 }
 
 # ----------------------------------------------------------------------------
 
 dh_boot()
 {
-  rm -f "$DHQ_VMDIR/$DHQ_VMNAME.pid" &>/dev/null
+  local qemu_errno
 
-  [[ $DHQ_INSTALL_TPM == "true" ]] && dh_launchswtpm
+  rm -f "$DHQ_VMPATH/$DHQ_VMNAME/$DHQ_VMNAME.pid" &>/dev/null
 
-  if [[ $DHQ_HUGE == "true" ]]; then
-    [[ ! -d $DHQ_HUGEMOUNT ]] && dh_error 99 "$DHQ_HUGEMOUNT does not exist. See https://www.linux-kvm.org/page/UsingLargePages"
-    dh_adjusthuge
+  [[ $DHQ_HUGE == "true" ]] && dh_adjusthuge
+
+  [[ -n $DHQ_TPM ]] && dh_launchswtpm
+
+  $DHQ_QEMUBIN $DHQ_CMD
+  qemu_errno=$?
+  if (( $qemu_errno != 0 )); then
+    dh_killswtpm
+    dh_error $qemu_errno "failed to boot guest"
   fi
 
-  $DHQ_QEMUSYS $DHQ_CMD
-  dh_error $? "failed to boot guest"
+  [[ ! -f "$DHQ_VMPATH/$DHQ_VMNAME/$DHQ_VMNAME.pid" ]] &&
+    dh_error 99 "qemu did not create a pid file at $DHQ_VMPATH/$DHQ_VMNAME/$DHQ_VMNAME.pid"
 
-  [[ ! -f "$DHQ_VMDIR/$DHQ_VMNAME.pid" ]] &&
-    dh_error 99 "qemu did not create a pid file at $DHQ_VMDIR/$DHQ_VMNAME.pid"
-
-  DHQ_PID=$(cat "$DHQ_VMDIR/$DHQ_VMNAME.pid" |  head -1)
+  DHQ_PID=$(cat "$DHQ_VMPATH/$DHQ_VMNAME/$DHQ_VMNAME.pid" |  head -1)
 
   if [[ -n $DHQ_CPUNICE ]]; then
     renice $DHQ_CPUNICE -p $DHQ_PID
@@ -560,48 +542,55 @@ dh_boot()
 
 # ----------------------------------------------------------------------------
 
-dh_getconf()
+dh_getguestconf()
 {
-  unset DHQ_VMNAME DHQ_VMDIR DHQ_UUID DHQ_MAC DHQ_BRIDGE DHQ_MTU DHQ_VDISK
-  source "$DHQ_CONF"
-  dh_error $? "unable to read conf file: $DHQ_CONF"
+  source "$DHQ_CONFDIR/$1.dhqemu" &>/dev/null
+  dh_error $? "unable to read $DHQ_CONFDIR/$1.dhqemu"
+
+  [[ -z $DHQ_VMNAME ]] && dh_error 99 "DHQ_VMNAME undefined"
+  [[ -z $DHQ_VMPATH ]] && dh_error 99 "DHQ_VMPATH undefined"
+  [[ -z $DHQ_QEMUCMD ]] && dh_error 99 "DHQ_QEMUBIN undefined"
+  [[ -z $DHQ_CF ]] && dh_error 99 "DHQ_CF undefined"
+
+  source "$DHQ_VMPATH/$DHQ_VMNAME/persist.vars" &>/dev/null
 }
 
 # ----------------------------------------------------------------------------
 
-dh_getguestconf()
+dh_getconf()
 {
-  source "$DHQ_CONFDIR/$1.conf"
-  dh_error $? "unable to read $DHQ_CONFDIR/$1.conf"
-
-  [[ -z $DHQ_VMNAME ]] && dh_error 99 "DHQ_VMNAME is undefined"
-  [[ -z $DHQ_VMDIR ]] && DHQ_VMDIR="$DHQ_VMPATH/$DHQ_VMNAME"
-
-  source "$DHQ_VMDIR/persist.vars" &>/dev/null
+  for x in $DHQ_SEARCH; do
+    source "$x/dhqemu.conf" &>/dev/null
+    if (( $? == 0 )); then
+      [[ -z $DHQ_CONFDIR ]] && dh_error 99 "DHQ_CONFDIR undefined"
+      return
+    fi
+  done
+  dh_error $? "unable to find dhqemu.conf in paths: $DHQ_SEARCH"
 }
 
 # script begin
 # ----------------------------------------------------------------------------
 
+dh_getconf
+
 [[ ! -x $(type -p socat) ]] &&
-  dh_error 99 "this script requires socat"
+  dh_error 99 "please install socat"
 
 [[ ! -x $(type -p uuidgen) ]] &&
-  dh_error 99 "this script requires uuidgen"
+  dh_error 99 "please install uuidgen"
 
-[[ -x $(type -p $DHQ_QEMUSYS) ]] &&
-  dh_error 99 "$DHQ_QEMUSYS not found"
+[[ -x $(type -p $DHQ_QEMUBIN) ]] &&
+  dh_error 99 "$DHQ_QEMUBIN not found"
 
-[[ $EUID -ne 0 ]] &&
-  dh_error 99 "this script is designed to run with root privilege"
-
-dh_getconf
+#[[ $EUID -ne 0 ]] &&
+#  dh_error 99 "this script is designed to run with root privilege"
 
 case $1 in
   boot)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_runcheck
+    dh_runcheck run
     dh_mklock
     dh_preboot
     dh_createdisks
@@ -628,7 +617,7 @@ case $1 in
   iceboot)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_runcheck
+    dh_runcheck run
     dh_mklock
     dh_preboot
     dh_createdisks
@@ -646,7 +635,7 @@ case $1 in
   reset|reboot)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_noruncheck
+    dh_runcheck norun
     echo system_reset | dh_monitor
     dh_error $? "unable to issue quit command"
     echo success
@@ -654,7 +643,7 @@ case $1 in
   freeze)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_noruncheck
+    dh_runcheck norun
     echo stop | dh_monitor
     dh_error $? "unable to issue freeze command"
     echo success
@@ -662,7 +651,7 @@ case $1 in
   thaw)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_noruncheck
+    dh_runcheck norun
     echo cont | dh_monitor
     dh_error $? "unable to issue continue command"
     echo success
@@ -670,7 +659,7 @@ case $1 in
   wake)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_noruncheck
+    dh_runcheck norun
     echo system_wakeup | dh_monitor
     dh_error $? "unable to issue system_wakeup"
     echo success
@@ -678,7 +667,7 @@ case $1 in
   shut|shutdown|poweroff)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_noruncheck
+    dh_runcheck norun
     dh_shutdown
     dh_killswtpm
     ;;
@@ -698,7 +687,7 @@ case $1 in
   kill)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_noruncheck
+    dh_runcheck norun
     echo quit | dh_monitor
     dh_error $? "unable to issue quit command"
     dh_killswtpm
@@ -722,12 +711,12 @@ case $1 in
   mon)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_noruncheck
+    dh_runcheck norun
     dh_monitor
     dh_error $? "unable to connect to qemu monitor socket"
     ;;
   list)
-    [[ -z "$(ls $DHQ_CONFDIR/*.conf)" ]] &&
+    [[ -z "$(ls $DHQ_CONFDIR/*.dhqemu)" ]] &&
       dh_error 99 "no .conf files found in $DHQ_CONFDIR"
 
     dh_header
@@ -736,40 +725,38 @@ case $1 in
     echo "vmname           uuid                                  path"
     echo ---------------------------------------------------------------------------
 
-    for x in $DHQ_CONFDIR/*.conf; do
+    for vm in $DHQ_CONFDIR/*.dhqemu; do
       dh_getconf
-      source $x
-      dh_error $? "error reading $x"
-
+      source $vm
+      dh_error $? "error reading $vm"
       dh_getguestconf $DHQ_VMNAME
-
       [[ -z $DHQ_UUID ]] && DHQ_UUID="to-be-generated"
-      printf "%-15s  %-36s  %s\n" $DHQ_VMNAME $DHQ_UUID $DHQ_VMDIR
+      printf "%-15s  %-36s  %s\n" $DHQ_VMNAME $DHQ_UUID $DHQ_VMPATH/$DHQ_VMNAME
     done
     echo
     ;;
   pid)
-    ps -fC $DHQ_QEMUSYS
+    ps -fC $DHQ_QEMUBIN
     ;;
   dir)
     [[ -z "$2" ]] && dh_usage
     dh_getconf
     dh_getguestconf $2
-    echo folder location: $DHQ_VMDIR
+    echo folder location: $DHQ_VMPATH/$DHQ_VMNAME
     echo -------------------------------------------------
-    ls -laF $DHQ_VMDIR
+    ls -laF "$DHQ_VMPATH/$DHQ_VMNAME"
     ;;
   back|backup)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_runcheck
+    dh_runcheck run
     dh_backup
     echo success
     ;;
   unplug)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_noruncheck
+    dh_runcheck norun
     echo "device_del dhtemp0" | dh_monitor
     dh_error $? "unable to issue device_del command"
     echo success
@@ -779,7 +766,7 @@ case $1 in
     dh_getguestconf $2
     [[ ! -f "$3" ]] &&
       dh_error 99 "unable to access file: $3"
-    dh_noruncheck
+    dh_runcheck norun
     printf "%s\n%s\n" "drive_add 0 if=none,id=dhplugdrv,file=$3" "device_add usb-storage,drive=dhplugdrv,id=dhtemp0" | dh_monitor
     dh_error $? "unable to issue device_add command"
     echo success
@@ -795,30 +782,30 @@ case $1 in
   commit)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_runcheck
+    dh_runcheck run
     dh_commit $3
     ;;
   revert)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_runcheck
+    dh_runcheck run
     dh_revert $3
     ;;
   erase)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_runcheck
+    dh_runcheck run
     dh_erase $3
     ;;
   delete)
     [[ -z "$2" ]] && dh_usage
     dh_getguestconf $2
-    dh_runcheck
+    dh_runcheck run
 
-    [[ ! -d $DHQ_VMDIR ]] && dh_error 99 "$DHQ_VMDIR does not exist"
+    [[ ! -d "$DHQ_VMPATH/$DHQ_VMNAME" ]] && dh_error 99 "$DHQ_VMPATH/$DHQ_VMNAME does not exist"
 
-    rm -rvf "$DHQ_VMDIR"
-    dh_error $? "unable to remove folder $DHQ_VMDIR"
+    rm -rvf "$DHQ_VMPATH/$DHQ_VMNAME"
+    dh_error $? "unable to remove folder $DHQ_VMPATH/$DHQ_VMNAME"
     echo success
     ;;
   *)
