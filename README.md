@@ -8,9 +8,7 @@
 
               Cryptocurrency Trading Bot
      Written by George Shearer (george@shearer.tech)
-
-
-  ▄▄▄▄         ▄▄·  ▄ .▄ ▄▄▄· ▄▄▄▄▄
+  ·▄▄▄▄         ▄▄·  ▄ .▄ ▄▄▄· ▄▄▄▄▄
   ██▪ ██ ▪     ▐█ ▌▪██▪▐█▐█ ▀█ •██
   ▐█· ▐█▌ ▄█▀▄ ██ ▄▄██▀▐█▄█▀▀█  ▐█.▪
   ██. ██ ▐█▌.▐▌▐███▌██▌▐▀▐█ ▪▐▌ ▐█▌·
