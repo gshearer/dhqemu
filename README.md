@@ -31,10 +31,10 @@ Features:
 * systemd integration for stopping or starting vms with system
 * simple one file backups of all necessary files for each VM
 
-
 ## Usage
 
-Usage: dhqemu command guestname args:
+Usage: dhqemu command guestname [args]
+
 Where command is one of:
 
   boot     :: power on guest
