@@ -34,7 +34,7 @@ Features:
 
 ## Usage
 
-Usage: dhqemu command guestname args
+Usage: dhqemu command guestname args:
 Where command is one of:
 
   boot     :: power on guest
