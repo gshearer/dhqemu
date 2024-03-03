@@ -1,5 +1,6 @@
 # dhqemu
 
+<pre>
 ·▄▄▄▄         ▄▄·  ▄ .▄ ▄▄▄· ▄▄▄▄▄
 ██▪ ██ ▪     ▐█ ▌▪██▪▐█▐█ ▀█ •██  
 ▐█· ▐█▌ ▄█▀▄ ██ ▄▄██▀▐█▄█▀▀█  ▐█.▪
@@ -10,7 +11,7 @@
 
     Written by George Shearer
        george@shearer.tech
-
+</pre>
 
 ## About
 
