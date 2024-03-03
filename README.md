@@ -34,6 +34,7 @@ Features:
 
 ## Usage
 
+<pre>
 Usage: dhqemu command guestname [args]
 
 Where command is one of:
@@ -64,3 +65,4 @@ commands with args:
   commit guestname [disknum]           :: commit change disk
   revert guestname [disknum]           :: erase change disk and recreate
   erase  guestname [disknum]           :: erase base disk and recreate
+</pre>
