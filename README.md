@@ -1,31 +1,18 @@
 # dhqemu
 
-    ▄▄▌ ▐ ▄▌ ▄ .▄▄▄▄ . ▐ ▄ • ▌ ▄ ·.              ▐ ▄ 
-    ██· █▌▐███▪▐█▀▄.▀·•█▌▐█·██ ▐███▪▪     ▪     •█▌▐█
-    ██▪▐█▐▐▌██▀▐█▐▀▀▪▄▐█▐▐▌▐█ ▌▐▌▐█· ▄█▀▄  ▄█▀▄ ▐█▐▐▌
-    ▐█▌██▐█▌██▌▐▀▐█▄▄▌██▐█▌██ ██▌▐█▌▐█▌.▐▌▐█▌.▐▌██▐█▌
-     ▀▀▀▀ ▀▪▀▀▀ · ▀▀▀ ▀▀ █▪▀▀  █▪▀▀▀ ▀█▄▀▪ ▀█▄▀▪▀▀ █▪
+·▄▄▄▄         ▄▄·  ▄ .▄ ▄▄▄· ▄▄▄▄▄
+██▪ ██ ▪     ▐█ ▌▪██▪▐█▐█ ▀█ •██  
+▐█· ▐█▌ ▄█▀▄ ██ ▄▄██▀▐█▄█▀▀█  ▐█.▪
+██. ██ ▐█▌.▐▌▐███▌██▌▐▀▐█ ▪▐▌ ▐█▌·
+▀▀▀▀▀•  ▀█▄▀▪·▀▀▀ ▀▀▀ · ▀  ▀  ▀▀▀ 
 
-              Cryptocurrency Trading Bot
-  ·▄▄▄▄         ▄▄·  ▄ .▄ ▄▄▄· ▄▄▄▄▄
-  ██▪ ██ ▪     ▐█ ▌▪██▪▐█▐█ ▀█ •██
-  ▐█· ▐█▌ ▄█▀▄ ██ ▄▄██▀▐█▄█▀▀█  ▐█.▪
-  ██. ██ ▐█▌.▐▌▐███▌██▌▐▀▐█ ▪▐▌ ▐█▌·
-  ▀▀▀▀▀•  ▀█▄▀▪·▀▀▀ ▀▀▀ · ▀  ▀  ▀▀▀
+   DHQEMU Version: 2024030101
 
-     Written by George Shearer (george@shearer.tech)
-  ·▄▄▄▄         ▄▄·  ▄ .▄ ▄▄▄· ▄▄▄▄▄
-  ██▪ ██ ▪     ▐█ ▌▪██▪▐█▐█ ▀█ •██
-  ▐█· ▐█▌ ▄█▀▄ ██ ▄▄██▀▐█▄█▀▀█  ▐█.▪
-  ██. ██ ▐█▌.▐▌▐███▌██▌▐▀▐█ ▪▐▌ ▐█▌·
-  ▀▀▀▀▀•  ▀█▄▀▪·▀▀▀ ▀▀▀ · ▀  ▀  ▀▀▀
-     Written by George Shearer (george@shearer.tech)
-
-DHQEMU - Thin hypervisor implemented with #!/bin/bash
+    Written by George Shearer
+       george@shearer.tech
 
 
-Hello!
-------
+## About
 
 This is a thin hypervisor written in bash. It directly invokes QEMU with KVM features.
 
@@ -44,17 +31,8 @@ Features:
 * systemd integration for stopping or starting vms with system
 * simple one file backups of all necessary files for each VM
 
-·▄▄▄▄         ▄▄·  ▄ .▄ ▄▄▄· ▄▄▄▄▄
-██▪ ██ ▪     ▐█ ▌▪██▪▐█▐█ ▀█ •██  
-▐█· ▐█▌ ▄█▀▄ ██ ▄▄██▀▐█▄█▀▀█  ▐█.▪
-██. ██ ▐█▌.▐▌▐███▌██▌▐▀▐█ ▪▐▌ ▐█▌·
-▀▀▀▀▀•  ▀█▄▀▪·▀▀▀ ▀▀▀ · ▀  ▀  ▀▀▀ 
 
-   DHQEMU Version: 2024030101
-
-    Written by George Shearer
-       george@shearer.tech
-
+## Usage
 
 Usage: dhqemu command guestname [args]
 
