@@ -7,12 +7,19 @@
      ▀▀▀▀ ▀▪▀▀▀ · ▀▀▀ ▀▀ █▪▀▀  █▪▀▀▀ ▀█▄▀▪ ▀█▄▀▪▀▀ █▪
 
               Cryptocurrency Trading Bot
+  ·▄▄▄▄         ▄▄·  ▄ .▄ ▄▄▄· ▄▄▄▄▄
+  ██▪ ██ ▪     ▐█ ▌▪██▪▐█▐█ ▀█ •██
+  ▐█· ▐█▌ ▄█▀▄ ██ ▄▄██▀▐█▄█▀▀█  ▐█.▪
+  ██. ██ ▐█▌.▐▌▐███▌██▌▐▀▐█ ▪▐▌ ▐█▌·
+  ▀▀▀▀▀•  ▀█▄▀▪·▀▀▀ ▀▀▀ · ▀  ▀  ▀▀▀
+
      Written by George Shearer (george@shearer.tech)
   ·▄▄▄▄         ▄▄·  ▄ .▄ ▄▄▄· ▄▄▄▄▄
   ██▪ ██ ▪     ▐█ ▌▪██▪▐█▐█ ▀█ •██
   ▐█· ▐█▌ ▄█▀▄ ██ ▄▄██▀▐█▄█▀▀█  ▐█.▪
   ██. ██ ▐█▌.▐▌▐███▌██▌▐▀▐█ ▪▐▌ ▐█▌·
   ▀▀▀▀▀•  ▀█▄▀▪·▀▀▀ ▀▀▀ · ▀  ▀  ▀▀▀
+     Written by George Shearer (george@shearer.tech)
 
 DHQEMU - Thin hypervisor implemented with #!/bin/bash
 
