@@ -6,7 +6,7 @@
 
 # ----------------------------------------------------------------------------
 
-DHQ_VERSION=2024030101
+DHQ_VERSION=2024032401
 
 # paths that will be searched for dhqemu.conf
 DHQ_SEARCH="$XDG_CONFIG_HOME/dhqemu $HOME/.config/dhqemu /etc /usr/local/etc"
@@ -619,9 +619,9 @@ case $1 in
     dh_getguestconf $2
     dh_runcheck run
     dh_mklock
+    DHQ_SUSPEND="-S"
     dh_preboot
     dh_createdisks
-    DHQ_SUSPEND="-S"
     dh_showqemu
     dh_boot
     rm -f "$DHQ_LOCKFILE"
