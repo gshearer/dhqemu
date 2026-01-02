@@ -7,7 +7,7 @@
 ██. ██ ▐█▌.▐▌▐███▌██▌▐▀▐█ ▪▐▌ ▐█▌·
 ▀▀▀▀▀•  ▀█▄▀▪·▀▀▀ ▀▀▀ · ▀  ▀  ▀▀▀ 
 
-   DHQEMU Version: 2025010201
+   DHQEMU Version: 2026010201
 
     Written by George Shearer
        george@shearer.tech
