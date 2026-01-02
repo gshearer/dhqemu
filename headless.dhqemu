@@ -1,0 +1,11 @@
+# a headless linux guest with VNC remote display
+DHQ_VMNAME="linheadless"
+DHQ_VIDEO="-device virtio-gpu,id=video0"
+DHQ_DISPLAY="-display none"
+DHQ_AUDIO=""
+DHQ_SOUND=""
+DHQ_VNC="-vnc :0,password=off"
+DHQ_TPM=false
+DHQ_MAC[0]="generate"
+DHQ_BRIDGE[0]="br0"
+DHQ_MTU[0]=9000

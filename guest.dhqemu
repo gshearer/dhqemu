@@ -1,0 +1,2 @@
+# a guest that will use all of the defaults in dhqemu.conf
+DHQ_VMNAME="guest"

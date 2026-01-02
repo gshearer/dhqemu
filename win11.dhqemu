@@ -1,12 +1,14 @@
+# Windows 11 guest example with local display and sound
 DHQ_VMNAME="win11"
-DHQ_MEM=16384
+DHQ_CPU="-cpu host,hv-time=on,hv-relaxed=on,hv-vapic=on,hv-spinlocks=0x1fff -smp 14,sockets=1,dies=1,cores=14,threads=1"
+DHQ_MEM=8192
 DHQ_HUGE=true
-# use qxl until you can get the virtio driver installed (via rdp or vnc etc)
-#DHQ_VIDEO="-device qxl-vga,id=video0"
-DHQ_BRIDGE[0]="br0"
-DHQ_VDISK[0]="80G"
-DHQ_CPU="-cpu host,hv-time=on,hv-relaxed=on,hv-vapic=on,hv-spinlocks=0x1fff -smp 44,sockets=1,dies=1,cores=44,threads=1"
-DHQ_CD[0]="/mnt/fast/images/win11.iso"
-DHQ_CD[1]="/mnt/fast/images/virtio.iso"
-DHQ_VNC="-vnc :3,password=off"
+DHQ_DISPLAY="-display gtk,gl=on,grab-on-hover=off,window-close=on"
+DHQ_VIDEO="-device virtio-vga,id=video0"
+DHQ_AUDIO="-audiodev pipewire,id=audio0"
+DHQ_SOUND="-device intel-hda,id=sound -device hda-duplex,id=codec0,bus=sound.0,cad=0,audiodev=audio0"
+DHQ_VDISK[0]="50G"
+DHQ_SHARE[0]="$HOME"
+DHQ_CD[0]="$HOME/iso/win11.iso"
+DHQ_CD[1]="$HOME/iso/virtio.iso"
 DHQ_TPM=true
