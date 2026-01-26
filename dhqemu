@@ -6,7 +6,7 @@
 
 # ----------------------------------------------------------------------------
 
-DHQ_VERSION=2026010201
+DHQ_VERSION=2026012601
 
 # paths that will be searched for dhqemu.conf
 DHQ_SEARCH="$XDG_CONFIG_HOME/dhqemu $HOME/.config/dhqemu /etc /usr/local/etc"
@@ -282,16 +282,16 @@ dh_backup()
   if [[ ! -d "$DHQ_BACKUPPATH" ]]; then
     mkdir "$DHQ_BACKUPPATH"
     dh_error $? "unable to create folder $DHQ_BACKUPPATH"
-    chmod $DHQ_DPERM "$DHQ_ARCHIVE"
+    chmod $DHQ_DPERM "$DHQ_BACKUPPATH"
   fi
 
   echo
   echo backup underway - do not start the VM until completed
 
-  tar -cvpf - "$DHQ_VMPATH/$DHQ_VMNAME" | $DHQ_CF >"$DHQ_ARCHIVE/$DHQ_VMNAME.dhqemu.tar.$DHQ_CFEXT"
+  tar -cvpf - "$DHQ_VMPATH/$DHQ_VMNAME" | $DHQ_CF >"$DHQ_BACKUPPATH/$DHQ_VMNAME.dhqemu.tar.$DHQ_CFEXT"
   dh_error $? "failed to create backup archive for $DHQ_VMNAME"
 
-  chmod $DHQ_FPERM "$DHQ_ARCHIVE/$DHQ_VMNAME.dhqemu.tar.$DHQ_CFEXT"
+  chmod $DHQ_FPERM "$DHQ_BACKUPPATH/$DHQ_VMNAME.dhqemu.tar.$DHQ_CFEXT"
 
   echo
   echo backup complete - it is now safe to start the vm
